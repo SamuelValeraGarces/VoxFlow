@@ -1,0 +1,13 @@
+torch==2.5.1
+torchaudio==2.5.1
+sounddevice
+gradio>=4.44.0
+huggingface_hub
+safetensors
+numpy
+scipy
+librosa
+gdown
+s3prl
+packaging
+tqdm

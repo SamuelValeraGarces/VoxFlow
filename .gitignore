@@ -1,0 +1,13 @@
+models/
+*.pth
+*.pt
+*.safetensors
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.egg-info/
+dist/
+build/
+.conda/
+conda-env/
