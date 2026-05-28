@@ -64,8 +64,8 @@ class MelSpectrogramFeatures(nn.Module):
 
         spec = torch.stft(y, self.n_fft, hop_length=self.hop_length, win_length=self.win_size,
                           window=self.hann_window[win_key], center=self.center,
-                          pad_mode='reflect', normalized=False, onesided=True, return_complex=False)
-        spec = torch.sqrt(spec.pow(2).sum(-1) + 1e-6)
+                          pad_mode='reflect', normalized=False, onesided=True, return_complex=True)
+        spec = torch.sqrt(spec.real.pow(2) + spec.imag.pow(2) + 1e-6)
         spec = torch.matmul(self.mel_basis[fmax_key], spec)
         spec = _amp_to_db(spec, -115) - 20
         return _normalize(spec, 1, -115)

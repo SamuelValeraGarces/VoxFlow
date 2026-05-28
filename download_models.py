@@ -22,7 +22,7 @@ HF_FILES = ["fastu2++.pt", "meanvc_200ms.pt", "vocos.pt"]
 
 # Google Drive file ID for wavlm_large_finetune.pth
 # From: https://github.com/ASLP-lab/MeanVC (see their README for the link)
-WAVLM_GDRIVE_ID = None  # Set this if you have the Google Drive file ID
+WAVLM_GDRIVE_ID = "1-aE1NfzpRCLxA4GUxX9ITI3F9LlbtEGP"
 
 
 def download_hf_models():
