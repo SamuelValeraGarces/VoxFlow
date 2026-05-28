@@ -49,16 +49,18 @@ def parse_device_id(choice: str) -> int:
 
 # ── Real-time tab ─────────────────────────────────────────────────────────────
 
-def load_reference(audio_path: str, steps: int) -> str:
+def load_reference(audio_path: str, steps: int, pitch_shift: float) -> str:
     try:
         conv = get_converter()
         conv.steps = steps
+        conv.pitch_shift = pitch_shift
         if steps == 1:
             conv.timesteps = [1.0, 0.0]
         elif steps == 2:
             conv.timesteps = [1.0, 0.8, 0.0]
         conv.set_target_speaker(audio_path)
-        return f"Reference loaded. GPU: {str(conv.device).upper()}"
+        pitch_str = f" | Pitch: {pitch_shift:+.1f} st" if pitch_shift != 0 else ""
+        return f"Reference loaded. GPU: {str(conv.device).upper()}{pitch_str}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -123,7 +125,7 @@ def get_status() -> str:
 
 # ── File conversion tab ───────────────────────────────────────────────────────
 
-def convert_file(source_audio, reference_audio, steps: int):
+def convert_file(source_audio, reference_audio, steps: int, pitch_shift: float = 0.0):
     """Convert a file offline (no streaming)."""
     import tempfile
     import torchaudio.functional as taF
@@ -135,6 +137,7 @@ def convert_file(source_audio, reference_audio, steps: int):
     try:
         conv = get_converter()
         conv.steps = steps
+        conv.pitch_shift = pitch_shift
         conv.set_target_speaker(reference_audio)
 
         wav_np, sr = sf.read(source_audio, dtype='float32', always_2d=False)
@@ -197,6 +200,10 @@ def build_ui():
                             type="filepath",
                         )
                         steps_rt = gr.Slider(1, 2, value=2, step=1, label="Inference steps (1=faster, 2=better)")
+                        pitch_slider = gr.Slider(
+                            minimum=-12, maximum=12, value=0, step=0.5,
+                            label="Pitch shift (semitones) — male→female: +5 to +7",
+                        )
                         load_btn = gr.Button("Load reference", variant="primary")
                         load_status = gr.Textbox(label="Status", interactive=False)
 
@@ -214,7 +221,7 @@ def build_ui():
                         status_box = gr.Textbox(label="Stream status", lines=6, interactive=False)
                         refresh_btn = gr.Button("Refresh status")
 
-                load_btn.click(load_reference, inputs=[ref_audio, steps_rt], outputs=load_status)
+                load_btn.click(load_reference, inputs=[ref_audio, steps_rt, pitch_slider], outputs=load_status)
                 start_btn.click(start_stream, inputs=[in_device, out_device, wasapi_cb], outputs=load_status)
                 stop_btn.click(stop_stream, outputs=load_status)
                 refresh_btn.click(get_status, outputs=status_box)
@@ -226,6 +233,10 @@ def build_ui():
                         source_audio = gr.Audio(label="Source audio", type="filepath")
                         ref_audio_file = gr.Audio(label="Reference speaker", type="filepath")
                         steps_file = gr.Slider(1, 2, value=2, step=1, label="Inference steps")
+                        pitch_file = gr.Slider(
+                            minimum=-12, maximum=12, value=0, step=0.5,
+                            label="Pitch shift (semitones)",
+                        )
                         convert_btn = gr.Button("Convert", variant="primary")
                     with gr.Column():
                         output_audio = gr.Audio(label="Output")
@@ -233,7 +244,7 @@ def build_ui():
 
                 convert_btn.click(
                     convert_file,
-                    inputs=[source_audio, ref_audio_file, steps_file],
+                    inputs=[source_audio, ref_audio_file, steps_file, pitch_file],
                     outputs=[output_audio, convert_info],
                 )
 

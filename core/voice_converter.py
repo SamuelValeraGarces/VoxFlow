@@ -103,7 +103,7 @@ class VoxFlowConverter:
     """
 
     def __init__(self, model_dir: str = "models", device: str = "auto", steps: int = 2,
-                 use_sv_model: bool = False):
+                 use_sv_model: bool = False, pitch_shift: float = 0.0):
         if device == "auto":
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
@@ -111,6 +111,7 @@ class VoxFlowConverter:
 
         self.dtype = torch.float32  # inputs always FP32; autocast handles GPU precision
         self.model_dir = Path(model_dir)
+        self.pitch_shift = pitch_shift  # semitones; 0 = no shift, +6 = male→female typical
         self.steps = steps
         self.mutex = threading.Lock()
 
@@ -323,7 +324,13 @@ class VoxFlowConverter:
             result = wav_np[:-self.vocoder_wav_overlap]
         self.last_wav = wav_np[-self.vocoder_wav_overlap:]
 
-        # 8. Periodic cache reset (prevents ASR drift after ~10s)
+        # 8. Pitch shift (semitones; use for cross-gender conversion)
+        if self.pitch_shift != 0.0 and len(result) > 0:
+            result = librosa.effects.pitch_shift(
+                result.astype(np.float32), sr=SAMPLE_RATE, n_steps=self.pitch_shift
+            )
+
+        # 9. Periodic cache reset (prevents ASR drift after ~10s)
         self.chunk_count += 1
         if self.chunk_count % 50 == 0:
             self.reset_caches()
