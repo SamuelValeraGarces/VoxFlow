@@ -182,7 +182,7 @@ def build_ui():
     default_in = in_choices[0] if in_choices else ""
     default_out = out_choices[0] if out_choices else ""
 
-    with gr.Blocks(title="VoxFlow", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="VoxFlow") as demo:
         gr.Markdown("# VoxFlow\n**Real-time zero-shot voice conversion** · MeanVC + Vocos + WASAPI")
 
         with gr.Tabs():
@@ -271,4 +271,4 @@ def build_ui():
 
 if __name__ == "__main__":
     demo = build_ui()
-    demo.launch(server_name="127.0.0.1", server_port=7860, share=False)
+    demo.launch(server_name="127.0.0.1", server_port=7860, share=False, theme=gr.themes.Soft())

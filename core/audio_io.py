@@ -55,30 +55,56 @@ class AudioStream:
             try:
                 extra_in = sd.WasapiSettings(exclusive=True)
                 extra_out = sd.WasapiSettings(exclusive=True)
-                print("WASAPI Exclusive mode enabled.")
             except Exception:
-                print("WASAPI Exclusive not available, using shared mode.")
+                pass
 
-        self.in_stream = sd.InputStream(
-            device=input_device,
-            samplerate=SAMPLE_RATE,
-            blocksize=CHUNK,
-            channels=1,
-            dtype='int16',
-            callback=self._input_cb,
-            latency='low',
-            extra_settings=extra_in,
-        )
-        self.out_stream = sd.OutputStream(
-            device=output_device,
-            samplerate=SAMPLE_RATE,
-            blocksize=CHUNK,
-            channels=1,
-            dtype='float32',
-            callback=self._output_cb,
-            latency='low',
-            extra_settings=extra_out,
-        )
+        try:
+            self.in_stream = sd.InputStream(
+                device=input_device,
+                samplerate=SAMPLE_RATE,
+                blocksize=CHUNK,
+                channels=1,
+                dtype='int16',
+                callback=self._input_cb,
+                latency='low',
+                extra_settings=extra_in,
+            )
+            self.out_stream = sd.OutputStream(
+                device=output_device,
+                samplerate=SAMPLE_RATE,
+                blocksize=CHUNK,
+                channels=1,
+                dtype='float32',
+                callback=self._output_cb,
+                latency='low',
+                extra_settings=extra_out,
+            )
+            if extra_in is not None:
+                print("WASAPI Exclusive mode enabled.")
+        except Exception:
+            if extra_in is not None:
+                print("WASAPI Exclusive failed for this device, falling back to shared mode.")
+                extra_in = extra_out = None
+                self.in_stream = sd.InputStream(
+                    device=input_device,
+                    samplerate=SAMPLE_RATE,
+                    blocksize=CHUNK,
+                    channels=1,
+                    dtype='int16',
+                    callback=self._input_cb,
+                    latency='low',
+                )
+                self.out_stream = sd.OutputStream(
+                    device=output_device,
+                    samplerate=SAMPLE_RATE,
+                    blocksize=CHUNK,
+                    channels=1,
+                    dtype='float32',
+                    callback=self._output_cb,
+                    latency='low',
+                )
+            else:
+                raise
 
         self._proc_thread = threading.Thread(target=self._processing_loop, daemon=True)
 
