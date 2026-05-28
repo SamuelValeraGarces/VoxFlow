@@ -8,6 +8,7 @@ import time
 import threading
 import gradio as gr
 import numpy as np
+import soundfile as sf
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -125,7 +126,7 @@ def get_status() -> str:
 def convert_file(source_audio, reference_audio, steps: int):
     """Convert a file offline (no streaming)."""
     import tempfile
-    import torchaudio
+    import torchaudio.functional as taF
     import torch
 
     if source_audio is None or reference_audio is None:
@@ -136,10 +137,13 @@ def convert_file(source_audio, reference_audio, steps: int):
         conv.steps = steps
         conv.set_target_speaker(reference_audio)
 
-        waveform, sr = torchaudio.load(source_audio)
+        wav_np, sr = sf.read(source_audio, dtype='float32', always_2d=False)
+        if wav_np.ndim > 1:
+            wav_np = wav_np.mean(axis=1)
         if sr != SAMPLE_RATE:
-            waveform = torchaudio.functional.resample(waveform, sr, SAMPLE_RATE)
-        waveform = waveform.mean(0).numpy()
+            waveform_t = torch.from_numpy(wav_np).unsqueeze(0)
+            wav_np = taF.resample(waveform_t, sr, SAMPLE_RATE).squeeze().numpy()
+        waveform = wav_np
 
         # Process in chunks
         n_chunks = max(1, len(waveform) // CHUNK)
@@ -158,10 +162,11 @@ def convert_file(source_audio, reference_audio, steps: int):
 
         output = np.concatenate(output_chunks).astype(np.float32)
 
-        # Save to temp file
+        # Save to temp file (use soundfile to avoid torchcodec/FFmpeg dependency)
+        import soundfile as sf
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             tmp_path = f.name
-        torchaudio.save(tmp_path, torch.from_numpy(output).unsqueeze(0), SAMPLE_RATE)
+        sf.write(tmp_path, output, SAMPLE_RATE)
 
         info = f"Converted {len(waveform)/SAMPLE_RATE:.1f}s → {len(output)/SAMPLE_RATE:.1f}s"
         return tmp_path, info

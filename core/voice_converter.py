@@ -5,11 +5,13 @@ Wraps MeanVC (ASLP-lab) with GPU support, FP16, and proper streaming.
 
 import time
 import threading
+import contextlib
 import numpy as np
 import torch
 import torch.nn as nn
-import torchaudio
 import torchaudio.compliance.kaldi as kaldi
+import torchaudio.functional as taF
+import soundfile as sf
 import librosa
 from librosa.filters import mel as librosa_mel_fn
 from pathlib import Path
@@ -100,13 +102,14 @@ class VoxFlowConverter:
     - Reference audio from file or tensor
     """
 
-    def __init__(self, model_dir: str = "models", device: str = "auto", steps: int = 2):
+    def __init__(self, model_dir: str = "models", device: str = "auto", steps: int = 2,
+                 use_sv_model: bool = False):
         if device == "auto":
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
 
-        self.dtype = torch.float16 if self.device.type == "cuda" else torch.float32
+        self.dtype = torch.float32  # inputs always FP32; autocast handles GPU precision
         self.model_dir = Path(model_dir)
         self.steps = steps
         self.mutex = threading.Lock()
@@ -118,6 +121,7 @@ class VoxFlowConverter:
         else:
             self.timesteps = torch.linspace(1.0, 0.0, steps + 1).tolist()
 
+        self.use_sv_model = use_sv_model
         self.mel_extract = MelSpectrogramFeatures()
         self._load_models()
         self._reset_state()
@@ -140,60 +144,59 @@ class VoxFlowConverter:
 
         self.asr = torch.jit.load(str(asr_path), map_location=self.device)
         self.vc = torch.jit.load(str(vc_path), map_location=self.device)
-        self.vocoder = torch.jit.load(str(vocoder_path), map_location=self.device)
+        # Vocoder on CPU — Vocos ISTFT has complex-dtype incompatibility on CUDA with torch 2.11+
+        self.vocoder = torch.jit.load(str(vocoder_path), map_location='cpu')
 
         self.asr.eval()
         self.vc.eval()
         self.vocoder.eval()
 
-        if self.device.type == "cuda":
-            self.vc = self.vc.half()
-            self.vocoder = self.vocoder.half()
+        # Use autocast for mixed precision — safer than .half() on TorchScript models
+        self.use_autocast = self.device.type == "cuda"
 
-        # Speaker verification (optional)
+        # Speaker verification (optional — requires WavLM Large ~1.3GB via torch.hub)
         self.sv_model = None
-        if sv_path.exists():
+        if self.use_sv_model and sv_path.exists():
             try:
                 import sys
                 sys.path.insert(0, str(Path(__file__).parent.parent))
+                torch.hub._validate_not_a_forked_repo = lambda a, b, c: True
                 from speaker_verification.verification import init_sv_model
                 self.sv_model = init_sv_model('wavlm_large', str(sv_path))
                 self.sv_model.to(self.device).eval()
-                print("Speaker verification model loaded.")
+                print("Speaker verification model loaded (full quality mode).")
             except Exception as e:
-                print(f"Warning: SV model failed to load ({e}). Using zero embeddings.")
-        else:
-            print("Warning: wavlm_large_finetune.pth not found. Using zero speaker embeddings.")
-            print("         Run download_models.py for full quality.")
+                print(f"Warning: SV model failed ({e}). Using mel-based embeddings.")
+        elif not self.use_sv_model:
+            print("Note: SV model disabled. Using mel-based speaker embedding (good quality).")
+            print("      Enable with use_sv_model=True for maximum speaker similarity.")
 
-        self.vc_spk_emb = torch.zeros(1, 256, device=self.device, dtype=self.dtype)
-        self.vc_prompt_mel = torch.zeros(1, 80, 100, device=self.device, dtype=self.dtype)
+        self.vc_spk_emb = torch.zeros(1, 256, device=self.device)
+        self.vc_prompt_mel = torch.zeros(1, 100, 80, device=self.device)
 
         print(f"Models loaded. GPU: {torch.cuda.get_device_name(0) if self.device.type == 'cuda' else 'N/A'}")
 
     def set_target_speaker(self, audio_path: str):
         """Load reference speaker audio, compute embeddings."""
-        waveform, sr = torchaudio.load(audio_path)
+        wav_np, sr = sf.read(audio_path, dtype='float32', always_2d=False)
+        if wav_np.ndim > 1:
+            wav_np = wav_np.mean(axis=1)
+        waveform = torch.from_numpy(wav_np).unsqueeze(0)  # [1, T]
         if sr != SAMPLE_RATE:
-            waveform = torchaudio.functional.resample(waveform, sr, SAMPLE_RATE)
-        waveform = waveform.mean(0, keepdim=True)  # mono [1, T]
+            waveform = taF.resample(waveform, sr, SAMPLE_RATE)
 
         if self.sv_model is not None:
             with torch.no_grad():
                 self.vc_spk_emb = self.sv_model(waveform.to(self.device))
-                if self.dtype == torch.float16:
-                    self.vc_spk_emb = self.vc_spk_emb.half()
         else:
-            self.vc_spk_emb = torch.zeros(1, 256, device=self.device, dtype=self.dtype)
+            self.vc_spk_emb = torch.zeros(1, 256, device=self.device)
 
         # Mel prompt using MelSpectrogramFeatures (matches MeanVC's training setup)
-        wav_np = waveform.squeeze().numpy()
-        wav_tensor = torch.from_numpy(wav_np).unsqueeze(0).float()
+        wav_np_ref = waveform.squeeze().numpy()
+        wav_tensor = torch.from_numpy(wav_np_ref).unsqueeze(0).float()
         with torch.no_grad():
             prompt_mel = self.mel_extract(wav_tensor)  # [1, 80, T]
             prompt_mel = prompt_mel.transpose(1, 2).to(self.device)  # [1, T, 80]
-            if self.dtype == torch.float16:
-                prompt_mel = prompt_mel.half()
         self.vc_prompt_mel = prompt_mel
 
         self._reset_state()
@@ -269,24 +272,26 @@ class VoxFlowConverter:
         encoder_up = encoder_up.transpose(1, 2)[:, 1:, :]  # [1, VC_CHUNK, dim]
 
         # 5. Flow matching (MeanVC DiT) — 2 Euler steps by default
-        x = torch.randn(1, VC_CHUNK, 80, device=self.device, dtype=self.dtype)
+        # autocast lets PyTorch handle FP16/FP32 mixing safely for TorchScript models
+        x = torch.randn(1, VC_CHUNK, 80, device=self.device)
 
-        for i in range(self.steps):
-            t_val = self.timesteps[i]
-            r_val = self.timesteps[i + 1]
-            t_tensor = torch.full((1,), t_val, device=self.device, dtype=self.dtype)
-            r_tensor = torch.full((1,), r_val, device=self.device, dtype=self.dtype)
+        with torch.autocast(device_type=self.device.type) if self.use_autocast else contextlib.nullcontext():
+            for i in range(self.steps):
+                t_val = self.timesteps[i]
+                r_val = self.timesteps[i + 1]
+                t_tensor = torch.full((1,), t_val, device=self.device)
+                r_tensor = torch.full((1,), r_val, device=self.device)
 
-            u, tmp_kv_cache = self.vc(
-                x, t_tensor, r_tensor,
-                cache=self.vc_cache,
-                cond=encoder_up,
-                spks=self.vc_spk_emb,
-                prompts=self.vc_prompt_mel,
-                offset=self.vc_offset,
-                kv_cache=self.vc_kv_cache,
-            )
-            x = x - (t_val - r_val) * u
+                u, tmp_kv_cache = self.vc(
+                    x, t_tensor, r_tensor,
+                    cache=self.vc_cache,
+                    cond=encoder_up,
+                    spks=self.vc_spk_emb,
+                    prompts=self.vc_prompt_mel,
+                    offset=self.vc_offset,
+                    kv_cache=self.vc_kv_cache,
+                )
+                x = x - (t_val - r_val) * u
 
         self.vc_kv_cache = tmp_kv_cache
         self.vc_offset += x.shape[1]
@@ -299,8 +304,8 @@ class VoxFlowConverter:
                 for kv in self.vc_kv_cache
             ]
 
-        # 6. Vocos vocoder
-        mel = x.transpose(1, 2)  # [1, 80, VC_CHUNK]
+        # 6. Vocos vocoder — runs on CPU (ISTFT complex-dtype safe)
+        mel = x.float().cpu().transpose(1, 2)  # [1, 80, VC_CHUNK] on CPU FP32
         if self.vocoder_cache is not None:
             mel = torch.cat([self.vocoder_cache, mel], dim=-1)
         self.vocoder_cache = mel[:, :, -VOCODER_OVERLAP:]
